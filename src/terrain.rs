@@ -1,7 +1,7 @@
 use bevy::{pbr::wireframe::Wireframe, prelude::*};
 
 use crate::{
-    chunk::{Chunk, ChunkBundle, CHUNK_SIZE},
+    chunk::{Chunk, CHUNK_SIZE},
     player::Player,
     voxel::VOXEL_SIZE,
 };
@@ -24,9 +24,9 @@ pub struct Terrain {
 }
 
 fn generate_chunks(mut terrain: ResMut<Terrain>) {
-    for i in -16..=16 {
+    for i in -4..=4 {
         for j in -4..=4 {
-            for k in -16..=16 {
+            for k in -4..=4 {
                 terrain.chunks.push(Chunk::new(0, i, j, k));
             }
         }
@@ -42,14 +42,32 @@ fn process_terrain(
 ) {
     let t_player = q_player.single();
     for ref mut chunk in &mut terrain.chunks {
-        let delta = chunk.calculate_delta(t_player.translation);
+        let chunk_pos = Vec3::new(
+            chunk.chunk_x as f32,
+            chunk.chunk_y as f32,
+            chunk.chunk_z as f32,
+        ) * VOXEL_SIZE
+            * CHUNK_SIZE as f32;
+        let delta = (t_player.translation - chunk_pos).abs();
         let dist = (delta.x.powi(2) + delta.y.powi(2) + delta.z.powi(2)).sqrt();
+
         let rd = RENDER_DISTANCE_CHUNKS as f32 * CHUNK_SIZE as f32 * VOXEL_SIZE as f32;
+
         if chunk.entity.is_none() && dist < rd {
+            let transform = Vec3::new(
+                chunk.chunk_x as f32,
+                chunk.chunk_y as f32,
+                chunk.chunk_z as f32,
+            ) * CHUNK_SIZE as f32;
             chunk.entity = Some(
                 commands
                     .spawn((
-                        ChunkBundle::new(**chunk, &mut meshes, &mut materials),
+                        PbrBundle {
+                            mesh: meshes.add(chunk.to_mesh()),
+                            material: materials.add(chunk.to_material()),
+                            transform: Transform::from_translation(transform),
+                            ..default()
+                        },
                         Wireframe,
                     ))
                     .id(),
