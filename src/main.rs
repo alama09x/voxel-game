@@ -1,5 +1,6 @@
 mod camera;
 mod data;
+mod world;
 
 use bevy::{
     color::palettes::css::{BLUE, GREEN, RED},
