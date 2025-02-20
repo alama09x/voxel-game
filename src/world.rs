@@ -1,12 +1,12 @@
 use bevy::prelude::*;
-use serde_json::Value;
-
-use crate::data::Chunk;
+// use serde_json::Value;
+//
+// use crate::data::Chunk;
 
 pub struct WorldPlugin;
 
-#[derive(Resource)]
-pub struct RenderedChunks(Vec<Chunk>);
+// #[derive(Resource)]
+// pub struct RenderedChunks(Vec<Chunk>);
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
@@ -14,7 +14,7 @@ impl Plugin for WorldPlugin {
     }
 }
 
-fn setup(mut commands: Commands) {
-    let world_data: Value = serde_json::from_str(include_str!("../assets/worlds/main/world.json"))
-        .expect("Invalid world data!");
+fn setup(mut _commands: Commands) {
+    // let world_data: Value = serde_json::from_str(include_str!("../assets/worlds/main/world.json"))
+    //     .expect("Invalid world data!");
 }

@@ -34,16 +34,25 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let chunk = Chunk::new();
-    commands.spawn((
-        Mesh3d(meshes.add(chunk)),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color_texture: Some(asset_server.load("textures/atlas.png")),
-            ..default()
-        })),
-        Transform::default(),
-    ));
-
+    for x in -8..8 {
+        for z in -8..8 {
+            for y in -4..4 {
+                let chunk = Chunk::new(1, [x, y, z]);
+                commands.spawn((
+                    Mesh3d(meshes.add(chunk)),
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        base_color_texture: Some(asset_server.load("textures/atlas.png")),
+                        ..default()
+                    })),
+                    Transform::from_xyz(
+                        x as f32 * Chunk::WIDTH as f32,
+                        y as f32 * Chunk::WIDTH as f32,
+                        z as f32 * Chunk::WIDTH as f32,
+                    ),
+                ));
+            }
+        }
+    }
     commands.spawn((
         PointLight {
             shadows_enabled: true,

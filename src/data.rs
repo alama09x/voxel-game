@@ -5,6 +5,7 @@ use bevy::{
     utils::HashMap,
 };
 use bitmatch::bitmatch;
+// use noise::{NoiseFn, Perlin};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -124,8 +125,10 @@ pub struct Chunk(pub HashMap<ChunkIndex, Voxel>);
 
 pub type ChunkIndex = u16;
 pub type ChunkCoord = u8;
+pub type WorldChunkCoord = i32;
 
 impl Chunk {
+    pub const SEA_LEVEL: u32 = 32;
     pub const WIDTH: ChunkCoord = 16;
     pub const WIDTH_PADDED: ChunkCoord = Self::WIDTH + 2;
     pub const SIZE_PADDED: ChunkIndex = (Self::WIDTH_PADDED as ChunkIndex)
@@ -135,10 +138,12 @@ impl Chunk {
     pub const WORLD_SIZE: f32 = Voxel::WORLD_SIZE * Self::WIDTH as f32;
     pub const HALF_SIZE: f32 = 0.5 * Self::WORLD_SIZE;
 
-    // pub fn new(_seed: u8, _coords: [WorldChunkCoord; 3]) -> Self {
-    pub fn new() -> Self {
+    // pub fn new() -> Self {
+    pub fn new(_seed: u32, _coords: [WorldChunkCoord; 3]) -> Self {
         let mut voxels = HashMap::new();
+        // let perlin = Perlin::new(seed);
         for i in 0..Self::SIZE_PADDED {
+            // Circle
             let [x, y, z] = Self::deinterleave(i).map(|c| c as f32 - Self::HALF_SIZE);
             if (x * x + y * y + z * z).sqrt() < Self::HALF_SIZE {
                 if y < Self::HALF_SIZE * 0.5 {
@@ -147,6 +152,20 @@ impl Chunk {
                     voxels.insert(i, Voxel::Dirt);
                 }
             }
+            // let [x, y, z] = Self::deinterleave(i).map(|c| c as f32 - Self::HALF_SIZE);
+            // let x = x + coords[0] as f32 * Self::WORLD_SIZE;
+            // let z = z + coords[2] as f32 * Self::WORLD_SIZE;
+
+            // let max_y = (if (coords[1] * Self::WIDTH as i32) < Self::SEA_LEVEL as i32 {
+            //     1.0
+            // } else {
+            //     perlin.get([x as f64 * 0.001, z as f64 * 0.001]) - Self::HALF_SIZE as f64
+            // } * Self::WIDTH_PADDED as f64) as f32
+            //     - Self::HALF_SIZE;
+
+            // if y < max_y {
+            //     voxels.insert(i, Voxel::Stone);
+            // }
         }
         Self(voxels)
     }
