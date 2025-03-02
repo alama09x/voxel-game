@@ -26,6 +26,21 @@ fn draw_gizmos(mut gizmos: Gizmos) {
     gizmos.line(Vec3::ZERO, Vec3::X * 16.0, BLUE);
     gizmos.line(Vec3::ZERO, Vec3::Y * 16.0, GREEN);
     gizmos.line(Vec3::ZERO, Vec3::Z * 16.0, RED);
+    for x in -8..8 {
+        for z in -8..8 {
+            for y in -4..4 {
+                let pos = Vec3::new(
+                    x as f32 * Chunk::WIDTH as f32,
+                    y as f32 * Chunk::WIDTH as f32,
+                    z as f32 * Chunk::WIDTH as f32,
+                );
+                gizmos.cuboid(
+                    Transform::from_translation(pos).with_scale(Vec3::splat(Chunk::WIDTH as f32)),
+                    Color::srgba(1.0, 0.0, 0.0, 0.1),
+                )
+            }
+        }
+    }
 }
 
 fn setup(
@@ -34,6 +49,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    // Spawn rectangular prism of chunks
     for x in -8..8 {
         for z in -8..8 {
             for y in -4..4 {
