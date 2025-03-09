@@ -55,11 +55,75 @@ pub struct ChunkMeshUpdateRequest;
 pub struct ChunkDirty;
 
 impl Chunk<Block> {
-    pub fn generate(pos: ChunkPos, seed: u32) -> Self {
+    fn surface_heightmap([x, z]: [f64; 2], seed: u32) -> f64 {
+        let perlin = Perlin::new(seed);
         let simplex = Simplex::new(seed);
-        let worley = Worley::new(seed + 1);
-        let perlin = Perlin::new(seed + 2);
+        let worley = Worley::new(seed);
 
+        let warp_scale = 50.0;
+        let warp_strength = 2.0;
+
+        let xz_warped =
+            [x, z].map(|w| w + warp_strength * simplex.get([x / warp_scale, z / warp_scale]));
+
+        let mut height = 0.0;
+        let mut frequency = 0.8;
+        let mut amplitude = 1.0;
+
+        let scale = 100.0;
+        let persistence = 0.4;
+        let octaves = 8;
+
+        for noise in [
+            Box::new(perlin) as Box<dyn NoiseFn<f64, 2>>,
+            Box::new(simplex),
+            Box::new(worley),
+        ] {
+            for _ in 0..octaves {
+                height += amplitude * noise.get(xz_warped.map(|x| x * frequency / scale));
+                frequency *= 2.0;
+                amplitude *= persistence;
+            }
+        }
+
+        height * 50.0
+    }
+
+    fn cave_depth_field([x, y, z]: [f64; 3], seed: u32) -> f64 {
+        let perlin = Simplex::new(seed + 1);
+        let simplex = Simplex::new(seed + 1);
+        let worley = Simplex::new(seed + 1);
+
+        let scale = 100.0;
+        let octaves = 6;
+        let persistence = 0.5;
+
+        let mut density = 0.0;
+        let mut frequency = 1.0;
+        let mut amplitude = 1.0;
+
+        let warp_scale = 50.0;
+        let warp_strength = 2.0;
+
+        let xyz_warped =
+            [x, y, z].map(|w| w + warp_strength * simplex.get([x / warp_scale, z / warp_scale]));
+
+        for noise in [
+            Box::new(perlin) as Box<dyn NoiseFn<f64, 3>>,
+            Box::new(simplex),
+            Box::new(worley),
+        ] {
+            for _ in 0..octaves {
+                density += amplitude * noise.get(xyz_warped.map(|x| x * frequency / scale));
+                frequency *= 2.0;
+                amplitude *= persistence;
+            }
+        }
+
+        density
+    }
+
+    pub fn generate(pos: ChunkPos, seed: u32) -> Self {
         let mut data = Vec::with_capacity(CHUNK_SIZE);
         let [cx, cy, cz] = pos.0;
 
@@ -69,12 +133,7 @@ impl Chunk<Block> {
         let base_y = cy as f64 * cw;
         let base_z = cz as f64 * cw;
 
-        let scale = 20.0;
-        let octaves = 6;
-        let persistence = 0.5;
-        let warp_scale = 50.0;
-        let warp_strength = 2.0;
-
+        // Equation for voxel indices is x(cw)^2 + y(cw) + z
         for x in 0..CHUNK_WIDTH {
             for y in 0..CHUNK_WIDTH {
                 for z in 0..CHUNK_WIDTH {
@@ -82,57 +141,29 @@ impl Chunk<Block> {
                     let wy = base_y + y as f64;
                     let wz = base_z + z as f64;
 
-                    let wx_warped = wx
-                        + warp_strength
-                            * simplex.get([wx / warp_scale, wy / warp_scale, wz / warp_scale]);
-                    let wy_warped = wy
-                        + warp_strength
-                            * simplex.get([
-                                wx / warp_scale + 100.0,
-                                wy / warp_scale + 100.0,
-                                wz / warp_scale + 100.0,
-                            ]);
-                    let wz_warped = wz
-                        + warp_strength
-                            * simplex.get([
-                                wx / warp_scale + 200.0,
-                                wy / warp_scale + 200.0,
-                                wz / warp_scale + 200.0,
-                            ]);
+                    let height = Self::surface_heightmap([wx, wz], seed);
+                    let density = Self::cave_depth_field([wx, wy, wz], seed);
 
-                    let mut density = 0.0;
-                    let mut frequency = 1.0;
-                    let mut amplitude = 1.0;
-
-                    for _ in 0..octaves {
-                        density += amplitude
-                            * simplex.get([
-                                wx_warped * frequency / scale,
-                                wy_warped * frequency / scale,
-                                wz_warped * frequency / scale,
-                            ]);
-
-                        frequency *= 2.0;
-                        amplitude *= persistence;
-                    }
-
-                    let chamber_noise = worley.get([wx / 50.0, wy / 50.0, wz / 50.0]);
-
-                    density -= chamber_noise * 0.5;
-
-                    let height = perlin.get([wx * 0.03, wz * 0.03]) * 20.0 + 10.0;
-                    let voxel = if wy > height || density < -0.3 {
-                        Block::default_empty()
-                    } else if wy > height - 4.0 {
+                    let block = if wy < height - 16.0 {
+                        if density < -0.3 {
+                            Block::Air
+                        } else if density > 0.3 {
+                            Block::Air
+                        } else {
+                            let t = (density + 0.3) / 0.6;
+                            Block::lerp(Block::Air, Block::Stone, t)
+                        }
+                    } else if wy < height - 8.0 {
+                        Block::Stone
+                    } else if wy < height - 4.0 {
                         Block::Dirt
-                    } else if density > 0.3 {
-                        Block::default_opaque()
+                    } else if wy < height {
+                        Block::Grass
                     } else {
-                        let t = (density + 0.3) / 0.6;
-                        Block::lerp(Block::default_empty(), Block::default_opaque(), t)
+                        Block::Air
                     };
 
-                    data.push(voxel);
+                    data.push(block);
                 }
             }
         }
@@ -158,7 +189,7 @@ impl<V: Voxel> Chunk<V> {
             x < CHUNK_WIDTH && y < CHUNK_WIDTH && z < CHUNK_WIDTH,
             "Coordinates out of bounds"
         );
-        x as usize + y as usize * (CHUNK_WIDTH as usize) + z as usize * Self::WIDTH_SQ
+        x as usize * Self::WIDTH_SQ + y as usize * (CHUNK_WIDTH as usize) + z as usize
     }
 
     pub fn generate_mesh(
@@ -170,6 +201,18 @@ impl<V: Voxel> Chunk<V> {
         let mut normals = Vec::new();
         let mut uvs = Vec::new();
         let mut indices = Vec::new();
+
+        // for face in Face::ALL {
+        //     self.greedy_quads(
+        //         face,
+        //         neighbors,
+        //         &mut positions,
+        //         &mut normals,
+        //         &mut uvs,
+        //         &mut indices,
+        //     );
+        // }
+
         for x in 0..CHUNK_WIDTH {
             for y in 0..CHUNK_WIDTH {
                 for z in 0..CHUNK_WIDTH {
@@ -184,18 +227,16 @@ impl<V: Voxel> Chunk<V> {
                             pos,
                             face,
                             voxel,
+                            neighbors,
                             &mut positions,
                             &mut normals,
                             &mut uvs,
                             &mut indices,
-                            neighbors,
                         );
                     }
                 }
             }
         }
-
-        // let normals: Vec<_> = positions.iter().map(|_| [0.0, 0.0, 1.0]).collect();
 
         let mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
@@ -215,11 +256,11 @@ impl<V: Voxel> Chunk<V> {
         pos: [u8; 3],
         face: Face,
         voxel: &V,
+        neighbors: &[Option<&Chunk<V>>; 6],
         positions: &mut Vec<[f32; 3]>,
         normals: &mut Vec<[f32; 3]>,
         uvs: &mut Vec<[f32; 2]>,
         indices: &mut Vec<u32>,
-        neighbors: &[Option<&Chunk<V>>; 6],
     ) {
         if self.cull_face(pos, face, neighbors) {
             return;
@@ -228,82 +269,27 @@ impl<V: Voxel> Chunk<V> {
         let [x, y, z] = pos.map(|v| v as f32);
         let base_index = positions.len() as u32;
 
+        positions.extend(face.positions([x, y, z], [x + 1.0, y + 1.0, z + 1.0]));
+        normals.extend([face.normal(); 4]);
+
         let unit_u = ((V::all().len() - 1) as f32).recip();
         let unit_v = 6f32.recip();
 
-        let atlas_index = V::all().iter().position(|v| v == voxel).unwrap() - 1;
-        let u = atlas_index as f32 * unit_u;
-        let v;
+        let atlas_index = V::all().iter().position(|v| v == voxel).unwrap();
+        let u0 = atlas_index as f32 * unit_u;
+        let v0 = match face {
+            Face::Left => 0.0,
+            Face::Bottom => unit_v,
+            Face::Back => unit_v * 2.0,
+            Face::Right => unit_v * 3.0,
+            Face::Top => unit_v * 4.0,
+            Face::Front => unit_v * 5.0,
+        };
 
-        match face {
-            Face::Left => {
-                v = 0.0;
-                positions.extend([
-                    [x, y, z],
-                    [x, y + 1.0, z],
-                    [x, y + 1.0, z + 1.0],
-                    [x, y, z + 1.0],
-                ]);
-                normals.extend([[1.0, 0.0, 0.0]; 4]);
-            }
-            Face::Right => {
-                v = 3.0 * unit_v;
-                positions.extend([
-                    [x + 1.0, y, z],
-                    [x + 1.0, y, z + 1.0],
-                    [x + 1.0, y + 1.0, z + 1.0],
-                    [x + 1.0, y + 1.0, z],
-                ]);
-                normals.extend([[-1.0, 0.0, 0.0]; 4]);
-            }
-            Face::Down => {
-                v = 1.0 * unit_v;
-                positions.extend([
-                    [x, y, z],
-                    [x, y, z + 1.0],
-                    [x + 1.0, y, z + 1.0],
-                    [x + 1.0, y, z],
-                ]);
-                normals.extend([[0.0, 1.0, 0.0]; 4]);
-            }
-            Face::Up => {
-                v = 4.0 * unit_v;
-                positions.extend([
-                    [x, y + 1.0, z],
-                    [x + 1.0, y + 1.0, z],
-                    [x + 1.0, y + 1.0, z + 1.0],
-                    [x, y + 1.0, z + 1.0],
-                ]);
-                normals.extend([[0.0, -1.0, 0.0]; 4]);
-            }
-            Face::Front => {
-                v = 2.0 * unit_v;
-                positions.extend([
-                    [x, y, z],
-                    [x + 1.0, y, z],
-                    [x + 1.0, y + 1.0, z],
-                    [x, y + 1.0, z],
-                ]);
-                normals.extend([[0.0, 0.0, 1.0]; 4]);
-            }
-            Face::Back => {
-                v = 5.0 * unit_v;
-                positions.extend([
-                    [x, y, z + 1.0],
-                    [x, y + 1.0, z + 1.0],
-                    [x + 1.0, y + 1.0, z + 1.0],
-                    [x + 1.0, y, z + 1.0],
-                ]);
-                normals.extend([[0.0, 0.0, -1.0]; 4]);
-            }
-        }
+        let u1 = u0 + unit_u;
+        let v1 = v0 + unit_v;
 
-        uvs.extend([
-            [u, v],
-            [u + unit_u, v],
-            [u + unit_u, v + unit_v],
-            [u, v + unit_v],
-        ]);
+        uvs.extend([[u0, v1], [u0, v0], [u1, v0], [u1, v1]]);
 
         indices.extend([
             base_index,
@@ -313,6 +299,113 @@ impl<V: Voxel> Chunk<V> {
             base_index + 2,
             base_index + 3,
         ]);
+    }
+
+    fn greedy_quads(
+        &self,
+        face: Face,
+        neighbors: &[Option<&Chunk<V>>; 6],
+        positions: &mut Vec<[f32; 3]>,
+        normals: &mut Vec<[f32; 3]>,
+        uvs: &mut Vec<[f32; 2]>,
+        indices: &mut Vec<u32>,
+    ) {
+        let mut mask = [[false; CHUNK_WIDTH as usize]; CHUNK_WIDTH as usize];
+
+        for c in 0..CHUNK_WIDTH {
+            for b in 0..CHUNK_WIDTH {
+                for a in 0..CHUNK_WIDTH {
+                    if mask[b as usize][a as usize] {
+                        continue;
+                    }
+
+                    let pos = [a, b, c];
+                    if !self.cull_face(pos, face, neighbors) {
+                        let block = self.get(pos);
+                        let mut width = 1;
+                        let mut height = 1;
+
+                        while a + width < CHUNK_WIDTH {
+                            let next_pos = [a + width, b, c];
+                            if self.cull_face([a + width, b, c], face, neighbors)
+                                || self.get(next_pos) != block
+                                || mask[b as usize][(a + width) as usize]
+                            {
+                                break;
+                            }
+                            width += 1;
+                        }
+
+                        'outer: while b + height < CHUNK_WIDTH {
+                            for w in 0..width {
+                                if self.cull_face([a + w, c, b + height], face, neighbors)
+                                    || mask[(b + height) as usize][(a + w) as usize]
+                                {
+                                    break 'outer;
+                                }
+                            }
+                            height += 1;
+                        }
+
+                        for h in 0..height {
+                            for w in 0..width {
+                                mask[(b + h) as usize][(a + w) as usize] = true;
+                            }
+                        }
+
+                        let af = a as f32;
+                        let bf = b as f32;
+                        let cf = c as f32;
+                        let wf = width as f32;
+                        let hf = height as f32;
+
+                        let (min, max) = match face {
+                            Face::Left | Face::Right => {
+                                ([cf, af, bf], [cf + 1.0, af + wf, bf + hf])
+                            }
+                            Face::Bottom | Face::Top => {
+                                ([af, cf, bf], [af + wf, cf + 1.0, bf + hf])
+                            }
+                            Face::Back | Face::Front => {
+                                ([af, bf, cf], [af + wf, bf + hf, cf + 1.0])
+                            }
+                        };
+
+                        positions.extend(face.positions(min, max));
+                        normals.extend([face.normal(); 4]);
+
+                        let base_index = positions.len() as u32 - 4;
+                        indices.extend([
+                            base_index,
+                            base_index + 1,
+                            base_index + 2,
+                            base_index,
+                            base_index + 2,
+                            base_index + 3,
+                        ]);
+
+                        let unit_u = ((V::all().len() - 1) as f32).recip();
+                        let unit_v = 6f32.recip();
+
+                        let atlas_index = V::all().iter().position(|v| v == block).unwrap();
+                        let u0 = atlas_index as f32 * unit_u;
+                        let v0 = match face {
+                            Face::Left => 0.0,
+                            Face::Bottom => unit_v,
+                            Face::Back => unit_v * 2.0,
+                            Face::Right => unit_v * 3.0,
+                            Face::Top => unit_v * 4.0,
+                            Face::Front => unit_v * 5.0,
+                        };
+
+                        let u1 = u0 + unit_u;
+                        let v1 = v0 + unit_v;
+
+                        uvs.extend([[u0, v1], [u0, v0], [u1, v0], [u1, v1]]);
+                    }
+                }
+            }
+        }
     }
 
     fn cull_face(&self, pos: [u8; 3], face: Face, neighbors: &[Option<&Chunk<V>>; 6]) -> bool {
@@ -333,32 +426,32 @@ impl<V: Voxel> Chunk<V> {
                     self.get([x + 1, y, z]).is_opaque()
                 }
             }
-            Face::Down => {
+            Face::Bottom => {
                 if y == 0 {
-                    neighbors[Face::Down as usize]
+                    neighbors[Face::Bottom as usize]
                         .is_some_and(|c| c.get([x, CHUNK_WIDTH - 1, z]).is_opaque())
                 } else {
                     self.get([x, y - 1, z]).is_opaque()
                 }
             }
-            Face::Up => {
+            Face::Top => {
                 if y == CHUNK_WIDTH - 1 {
-                    neighbors[Face::Up as usize].is_some_and(|c| c.get([x, 0, z]).is_opaque())
+                    neighbors[Face::Top as usize].is_some_and(|c| c.get([x, 0, z]).is_opaque())
                 } else {
                     self.get([x, y + 1, z]).is_opaque()
                 }
             }
-            Face::Front => {
+            Face::Back => {
                 if z == 0 {
-                    neighbors[Face::Front as usize]
+                    neighbors[Face::Back as usize]
                         .is_some_and(|c| c.get([x, y, CHUNK_WIDTH - 1]).is_opaque())
                 } else {
                     self.get([x, y, z - 1]).is_opaque()
                 }
             }
-            Face::Back => {
+            Face::Front => {
                 if z == CHUNK_WIDTH - 1 {
-                    neighbors[Face::Back as usize].is_some_and(|c| c.get([x, y, 0]).is_opaque())
+                    neighbors[Face::Front as usize].is_some_and(|c| c.get([x, y, 0]).is_opaque())
                 } else {
                     self.get([x, y, z + 1]).is_opaque()
                 }

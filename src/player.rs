@@ -2,14 +2,17 @@ use std::{f32::consts::FRAC_PI_2, ops::Range};
 
 use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*, window::CursorGrabMode};
 
+use crate::chunk::{ChunkPos, CHUNK_WIDTH};
+
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlayerRotationSettings>()
             .init_resource::<PlayerMovementSettings>()
+            .add_event::<PlayerMoveChunkEvent>()
             .add_systems(Startup, setup)
-            .add_systems(Update, (rotate_player, move_player));
+            .add_systems(Update, (rotate_player, move_player, detect_player_movement));
     }
 }
 
@@ -23,7 +26,7 @@ struct PlayerMovementSettings {
 
 impl Default for PlayerMovementSettings {
     fn default() -> Self {
-        Self { speed: 10.0 }
+        Self { speed: 20.0 }
     }
 }
 
@@ -45,15 +48,20 @@ impl Default for PlayerRotationSettings {
     }
 }
 
-fn setup(mut commands: Commands, mut window: Single<&mut Window>) {
+fn setup(
+    mut commands: Commands,
+    mut window: Single<&mut Window>,
+    mut ev_writer: EventWriter<PlayerMoveChunkEvent>,
+) {
     window.cursor_options.grab_mode = CursorGrabMode::Locked;
     window.cursor_options.visible = false;
-
     commands.spawn((
         Player,
+        ChunkPos([0; 3]),
         Camera3d::default(),
-        Transform::default().looking_at(Vec3::X + Vec3::Z, Vec3::Y),
+        Transform::default().looking_at(Vec3::NEG_Z, Vec3::Y),
     ));
+    ev_writer.send(PlayerMoveChunkEvent(ChunkPos([0; 3])));
 }
 
 fn rotate_player(
@@ -96,6 +104,23 @@ fn move_player(
             KeyCode::Space => player.translation.y += speed_factor,
             KeyCode::ShiftLeft => player.translation.y -= speed_factor,
             _ => (),
+        }
+    }
+}
+
+#[derive(Event)]
+pub struct PlayerMoveChunkEvent(pub ChunkPos);
+
+pub fn detect_player_movement(
+    mut ev_writer: EventWriter<PlayerMoveChunkEvent>,
+    mut player: Query<(&Transform, &mut ChunkPos), (With<Player>, Changed<Transform>)>,
+) {
+    if let Ok((transform, mut prev_chunk_pos)) = player.get_single_mut() {
+        let new_pos = transform.translation / CHUNK_WIDTH as f32;
+        let new_chunk_pos = ChunkPos(new_pos.to_array().map(|x| x.floor() as i32));
+        if new_chunk_pos.0 != prev_chunk_pos.0 {
+            ev_writer.send(PlayerMoveChunkEvent(new_chunk_pos));
+            prev_chunk_pos.0 = new_chunk_pos.0;
         }
     }
 }

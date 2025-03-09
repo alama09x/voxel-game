@@ -1,5 +1,6 @@
 use std::{
     array,
+    collections::VecDeque,
     f32::consts::PI,
     fs::File,
     io::{BufReader, BufWriter},
@@ -12,7 +13,7 @@ use crate::{
         Chunk, ChunkDirty, ChunkMeshUpdateRequest, ChunkNeighbors, ChunkNeighborsUpdateRequest,
         ChunkPos, CHUNK_WIDTH,
     },
-    player::Player,
+    player::PlayerMoveChunkEvent,
     voxel::Voxel,
 };
 
@@ -23,6 +24,9 @@ use bevy::{
 };
 use serde::{Deserialize, Serialize};
 
+pub const RENDER_DISTANCE: u8 = 8;
+pub const CHUNKS_PER_FRAME: u8 = 8;
+
 #[derive(Resource)]
 pub struct Seed(pub u32);
 
@@ -32,11 +36,13 @@ impl<V: Voxel> Plugin for WorldPlugin<V> {
     fn build(&self, app: &mut App) {
         app.add_plugins(WireframePlugin)
             .insert_resource(Seed(rand::random_range(0..1000000)))
+            .insert_resource(WorldSave::<Block>::load("assets/world.bin").unwrap_or_default())
+            .init_resource::<ChunkManager>()
             .add_systems(
                 Update,
                 (
-                    unload_chunks::<V>,
-                    load_local_chunks,
+                    update_chunk_manager,
+                    load_local_chunks::<V>,
                     update_chunk_neighbors::<V>,
                     update_chunk_meshes::<V>,
                 )
@@ -46,7 +52,7 @@ impl<V: Voxel> Plugin for WorldPlugin<V> {
 }
 
 #[derive(thiserror::Error, Debug)]
-enum WorldError {
+pub enum WorldError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -54,8 +60,8 @@ enum WorldError {
     Bincode(#[from] bincode::Error),
 }
 
-#[derive(Serialize, Deserialize, Reflect)]
-struct WorldSave<V> {
+#[derive(Resource, Serialize, Deserialize, Reflect)]
+pub struct WorldSave<V> {
     chunks: Vec<(ChunkPos, Vec<(u16, V)>)>,
 }
 
@@ -140,101 +146,129 @@ pub fn update_chunk_meshes<V: Voxel>(
     }
 }
 
-pub const RENDER_DISTANCE: u8 = 8;
+#[derive(Resource, Default)]
+pub struct ChunkManager {
+    loaded_chunks: HashSet<ChunkPos>,
+    load_queue: VecDeque<ChunkPos>,
+    unload_queue: VecDeque<Entity>,
+}
 
-pub fn load_local_chunks(
+pub fn update_chunk_manager(
+    mut player_move_chunk_event: EventReader<PlayerMoveChunkEvent>,
+    chunks: Query<(Entity, &ChunkPos), With<Chunk<Block>>>,
+    mut chunk_manager: ResMut<ChunkManager>,
+) {
+    for ev in player_move_chunk_event.read() {
+        let ChunkPos([px, py, pz]) = ev.0;
+
+        chunk_manager.loaded_chunks.clear();
+        for (_, pos) in chunks.iter() {
+            chunk_manager.loaded_chunks.insert(*pos);
+        }
+
+        let rdf = RENDER_DISTANCE as f32;
+        let rdi = RENDER_DISTANCE as i32;
+        let mut desired_chunks =
+            HashSet::with_capacity((4.0 / 3.0 * PI * rdf.powi(3)).ceil() as usize);
+        for dx in -rdi..=rdi {
+            for dy in -rdi..=rdi {
+                for dz in -rdi..=rdi {
+                    let pos = ChunkPos([px + dx, py + dy, pz + dz]);
+                    if (dx * dx + dy * dy + dz * dz) as f32 <= rdf.powi(2) {
+                        desired_chunks.insert(pos);
+                    }
+                }
+            }
+        }
+
+        for pos in desired_chunks.difference(&chunk_manager.loaded_chunks.clone()) {
+            if !chunk_manager.load_queue.contains(pos) {
+                chunk_manager.load_queue.push_back(*pos);
+            }
+        }
+
+        for (entity, pos) in chunks.iter() {
+            if !desired_chunks.contains(pos) && !chunk_manager.unload_queue.contains(&entity) {
+                chunk_manager.unload_queue.push_back(entity);
+            }
+        }
+    }
+}
+
+pub fn load_local_chunks<V: Voxel>(
     seed: Res<Seed>,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    player: Query<&Transform, With<Player>>,
-    chunks: Query<&ChunkPos, With<Chunk<Block>>>,
+    mut chunk_manager: ResMut<ChunkManager>,
+    world: Res<WorldSave<V>>,
+    chunks: Query<(Entity, &ChunkPos), With<Chunk<V>>>,
 ) {
-    let player_transform = player.single();
-    let player_pos = player_transform.translation / CHUNK_WIDTH as f32;
-    let player_chunk = ChunkPos(player_pos.to_array().map(|x| x.floor() as i32));
-    let ChunkPos([px, py, pz]) = player_chunk;
+    let mut entities_to_unload = Vec::new();
 
-    let world = WorldSave::<Block>::load("assets/world.bin").unwrap();
+    for _ in 0..CHUNKS_PER_FRAME {
+        if let Some(pos) = chunk_manager.load_queue.pop_front() {
+            if chunk_manager.loaded_chunks.contains(&pos) {
+                continue;
+            }
 
-    let existing_chunks: HashSet<_> = chunks.iter().map(|pos| *pos).collect();
+            let posf = Vec3::from_array(pos.0.map(|x| x as f32));
 
-    let rdf = RENDER_DISTANCE as f32;
+            if let Some((_, rle)) = world.chunks.iter().find(|(p, _)| *p == pos) {
+                let chunk = Chunk::from_rle(&rle[..]);
+                commands.spawn((
+                    chunk,
+                    pos,
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        base_color: Color::WHITE,
+                        base_color_texture: Some(asset_server.load("textures/atlas.png")),
+                        perceptual_roughness: 0.8,
+                        ..Default::default()
+                    })),
+                    Wireframe,
+                    Transform::from_translation(posf * CHUNK_WIDTH as f32),
+                    ChunkNeighborsUpdateRequest,
+                    ChunkMeshUpdateRequest,
+                ));
+            } else {
+                let chunk = Chunk::<Block>::generate(pos, seed.0);
+                commands.spawn((
+                    chunk,
+                    pos,
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        base_color: Color::WHITE,
+                        base_color_texture: Some(asset_server.load("textures/atlas.png")),
+                        perceptual_roughness: 0.8,
+                        ..Default::default()
+                    })),
+                    Wireframe,
+                    Transform::from_translation(posf * CHUNK_WIDTH as f32),
+                    ChunkNeighborsUpdateRequest,
+                    ChunkMeshUpdateRequest,
+                    ChunkDirty,
+                ));
+            }
+            chunk_manager.loaded_chunks.insert(pos);
 
-    let mut chunks_to_load = Vec::with_capacity((4.0 / 3.0 * PI * rdf.powi(3)).ceil() as usize);
-    let rdi = RENDER_DISTANCE as i32;
-    for dx in -rdi..=rdi {
-        for dy in -rdi..=rdi {
-            for dz in -rdi..=rdi {
-                if (dx * dx + dy * dy + dz * dz) as f32 <= rdf.powi(2) {
-                    chunks_to_load.push(ChunkPos([px + dx, py + dy, pz + dz]));
+            for neighbor_pos in pos.offsets() {
+                if let Some((entity, _)) = chunks.iter().find(|(_, p)| **p == neighbor_pos) {
+                    commands
+                        .entity(entity)
+                        .insert(ChunkNeighborsUpdateRequest)
+                        .insert(ChunkMeshUpdateRequest);
                 }
             }
         }
     }
 
-    for pos in chunks_to_load {
-        let posf = Vec3::from_array(pos.0.map(|x| x as f32));
-
-        if let Some((_, rle)) = world.chunks.iter().find(|(p, _)| *p == pos) {
-            let chunk = Chunk::from_rle(&rle[..]);
-            let mesh = chunk.generate_mesh(&mut meshes, &[None; 6]);
-            commands.spawn((
-                chunk,
-                pos,
-                Mesh3d(mesh),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::WHITE,
-                    base_color_texture: Some(asset_server.load("textures/atlas.png")),
-                    perceptual_roughness: 0.8,
-                    ..Default::default()
-                })),
-                // Wireframe,
-                Transform::from_translation(posf * CHUNK_WIDTH as f32),
-                ChunkMeshUpdateRequest,
-                ChunkNeighborsUpdateRequest,
-            ));
-        } else if !existing_chunks.contains(&pos) {
-            let chunk = Chunk::<Block>::generate(pos, seed.0);
-            let mesh = chunk.generate_mesh(&mut meshes, &[None; 6]);
-            commands.spawn((
-                chunk,
-                pos,
-                Mesh3d(mesh),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::WHITE,
-                    base_color_texture: Some(asset_server.load("textures/atlas.png")),
-                    perceptual_roughness: 0.8,
-                    ..Default::default()
-                })),
-                // Wireframe,
-                Transform::from_translation(posf * CHUNK_WIDTH as f32),
-                ChunkMeshUpdateRequest,
-                ChunkNeighborsUpdateRequest,
-                ChunkDirty,
-            ));
+    if let Some(entity) = chunk_manager.unload_queue.pop_front() {
+        if chunks.get(entity).is_ok() {
+            entities_to_unload.push(entity);
         }
     }
-}
 
-pub fn unload_chunks<V: Voxel>(
-    mut commands: Commands,
-    player: Query<&Transform, With<Player>>,
-    chunks: Query<(Entity, &ChunkPos), With<Chunk<V>>>,
-) {
-    let player_transform = player.single();
-    let player_pos = player_transform.translation / CHUNK_WIDTH as f32;
-    let player_chunk = ChunkPos(player_pos.to_array().map(|x| x.floor() as i32));
-    let ChunkPos([px, py, pz]) = player_chunk;
-
-    let rdf = RENDER_DISTANCE as f32;
-    for (entity, _) in chunks.iter().filter(|(_, ChunkPos([cx, cy, cz]))| {
-        let dx = px - cx;
-        let dy = py - cy;
-        let dz = pz - cz;
-        (dx * dx + dy * dy + dz * dz) as f32 > rdf.powi(2)
-    }) {
+    for entity in entities_to_unload {
         commands.entity(entity).despawn();
     }
 }
