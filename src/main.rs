@@ -1,6 +1,5 @@
 mod block;
 mod chunk;
-mod ecs;
 mod face;
 mod lighting;
 mod player;
